@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# cleanup <version>
+# Deletes what a build or release of <version> left behind for this Ubuntu
+# version and arch: builder and test VMs with their network resources and
+# disks, and the image version if it wasn't promoted to stable. It only matches
+# resources that these scripts and source.pkr.hcl tagged or named, and is safe
+# to run at any time.
+set -euo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+
+version=${1:?usage: cleanup <version>}
+[[ $(az group exists --name "$resource_group") == true ]] || exit 0
+name=$(name_of "$image_os" "$arch" "$version")
+
+# VMs, network interfaces, public IPs, security groups and OS disks by their
+# tags, and the OS disks by name as well: Azure creates them along with their
+# VM, and they might not get its tags.
+resources | jq -r --arg version "$version" --arg arch "$arch" --arg name "$name" '.[] | select(
+    ((.tags.purpose == "image-builder" or .tags.purpose == "image-smoke-test")
+      and .tags.version == $version and .tags.arch == $arch)
+    or .name == "packer-\($name)-osdisk" or .name == "smoke-\($name)-osdisk") | .id' |
+  delete_resources
+
+if az sig image-definition show --resource-group "$resource_group" --gallery-name "$gallery" \
+  --gallery-image-definition "$definition" --output none 2>/dev/null; then
+  az sig image-version list --resource-group "$resource_group" --gallery-name "$gallery" \
+    --gallery-image-definition "$definition" --output json |
+    jq -r --arg version "$version" '.[] | select(.tags.version == $version and .tags.channel != "stable") | .id' |
+    while read -r id; do
+      "$(dirname "$0")/delete-image" "$id"
+    done
+fi

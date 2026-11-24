@@ -8,5 +8,9 @@ packer {
       source  = "github.com/hetznercloud/hcloud"
       version = "1.8.2"
     }
+    azure = {
+      source  = "github.com/hashicorp/azure"
+      version = "2.6.5"
+    }
   }
 }

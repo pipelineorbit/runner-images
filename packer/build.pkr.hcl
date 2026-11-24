@@ -10,6 +10,7 @@ build {
   # One entry per provider. Each source is defined in providers/<name>/source.pkr.hcl.
   sources = [
     "source.hcloud.ubuntu",
+    "source.azure-arm.ubuntu",
   ]
 
   # Upload images/ubuntu (scripts, files, versions.env) to /var/tmp/ubuntu.
@@ -51,9 +52,25 @@ build {
     destination = "output/manifest.json"
   }
 
-  # Last: remove everything that servers started from the image must not share.
+  # Steps for one provider's builds only, kept in that provider's folder:
+  # undoing what its base image or builder leaves behind. Nothing installed here.
   provisioner "shell" {
+    only            = ["azure-arm.ubuntu"]
     execute_command = "chmod +x {{ .Path }}; sudo env {{ .Vars }} {{ .Path }}"
+    script          = "providers/azure/deprovision.sh"
+  }
+
+  # Last: remove everything that servers started from the image must not share,
+  # including the user Packer logged in as, unless that's root. The script goes
+  # in /var/tmp/ubuntu, which it deletes, and Packer doesn't log in again to
+  # delete it (skip_clean): the user it would log in as is gone.
+  provisioner "shell" {
+    env = {
+      BUILD_USER = build.User
+    }
+    execute_command = "chmod +x {{ .Path }}; sudo env {{ .Vars }} {{ .Path }}"
+    remote_folder   = "/var/tmp/ubuntu"
+    skip_clean      = true
     inline = [
       "bash /var/tmp/ubuntu/provision/99-cleanup.sh",
       "rm -rf /var/tmp/ubuntu",

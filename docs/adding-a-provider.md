@@ -10,7 +10,7 @@ Outside its folder, a provider is registered in three places, one line each:
 | [`packer/build.pkr.hcl`](../packer/build.pkr.hcl) | `"source.<plugin>.ubuntu"` in the `sources` list |
 | [`.github/workflows/build-image.yml`](../.github/workflows/build-image.yml) | the provider's name in the `provider` matrix |
 
-Packer can't find sources or plugins by itself: a `build` block has to name each source, and `packer init` only installs plugins listed in `required_plugins`. `./build.sh` checks the `sources` line and tells you if it's missing.
+Packer can't find sources or plugins by itself: a `build` block has to name each source, and `packer init` only installs plugins listed in `required_plugins`. `./build.sh` checks the `sources` line and tells you if it's missing. A provider that needs [a step of its own on the image](#steps-on-the-image-for-one-provider) also adds a provisioner to `packer/build.pkr.hcl`.
 
 ## The provider interface
 
@@ -20,11 +20,15 @@ One Packer `source` block named `<plugin>.ubuntu`, plus the provider's own varia
 
 - **Base image:** Ubuntu `var.ubuntu_version` for `var.arch`, with cloud-init enabled. The build stops if the release or architecture doesn't match.
 - **Builder:** a server type for `var.arch`. Pick the smallest you plan to run if the provider ties the image to the builder's disk size.
-- **Login:** SSH as `root` or as a user with passwordless sudo.
+- **Login:** SSH as `root` or as a user with passwordless sudo. The shared cleanup deletes that user (Packer's `build.User`) before the image is saved, unless it's `root`.
 - **Name and metadata:** name the image `local.image_name` and store all of `local.image_metadata` (`image`, `arch`, `version`, `commit`, `channel=candidate`) in the provider's labels or tags.
 - **Builder labels:** label the builder server, and its SSH key if the provider has key objects, with `purpose=image-builder`, `version` and `arch`, so `ci/cleanup` can find them if a build is killed.
 - **Variables:** prefix them with the provider's name (`hetzner_location`, `scaleway_zone`). Defaults go in this file.
-- **Credentials:** only from the provider's standard environment variables, read by the plugin. Never from a file or a Packer variable in the repository.
+- **Credentials:** only from the provider's standard environment variables, read by the plugin, or from the provider's CLI login. Never from a file or a Packer variable in the repository.
+
+### Steps on the image for one provider
+
+The shared provisioning knows nothing about providers. If the provider's base image or builder leaves something behind that a server started from the image must not have, put a script in the provider's folder and add a `shell` provisioner for it to [`packer/build.pkr.hcl`](../packer/build.pkr.hcl), before the final cleanup, with `only = ["<plugin>.ubuntu"]`. Azure does this to reset its guest agent ([`providers/azure/deprovision.sh`](../providers/azure/deprovision.sh)). Such a script only undoes; anything the image should contain belongs in `images/ubuntu`.
 
 ### `ci/`
 
@@ -39,26 +43,27 @@ Executable Bash scripts that `build.sh release` (and you, locally) call by path.
 | `prune <keep>` | | Deletes this Ubuntu version and arch's `stable` images except the newest `<keep>`. Anything else the image uses (such as volume snapshots) goes too. |
 | `delete-image <image-id>` | | Deletes the image and what it uses. Succeeds if it's already gone. |
 | `cleanup <version>` | | Deletes what a build or release of that version left behind for this Ubuntu version and arch: builder and test servers, their SSH keys, and images not promoted to `stable`. It finds them by their labels and must not touch anything else, such as runner servers labelled with an image version. `build.sh release` runs it when a step fails, and the action again after a cancelled job. Succeeds if there's nothing to delete. |
+| `prepare` (optional) | | Runs before Packer in `build.sh build` and `release`. Creates what the build needs and the plugin doesn't create, if it's missing, so the first build in an empty account works: [Azure's](../providers/azure/ci/prepare) creates a gallery and a network. Must be safe to run again. |
 
-`ci/credentials` lists the environment variables that hold the provider's credentials, one per line. CI copies the secrets with those names from the provider's GitHub environment, and `./build.sh validate` gives them a placeholder value, because `packer validate` only checks that they're set. A `ci/lib.sh` for code the scripts share is fine.
+`ci/credentials` lists the environment variables that hold the provider's credentials, one per line. A name ending in `?` is optional. CI copies the secrets with those names from the provider's GitHub environment, and `./build.sh validate` gives the required ones a placeholder value, because `packer validate` only checks that they're set. A `ci/lib.sh` for code the scripts share is fine.
+
+A provider that logs in with GitHub's OIDC token instead of a long-lived secret (common on AWS, Google Cloud and Azure) does it in `ci/lib.sh`, so every script logs in by itself, and needs no change to the workflow: the build job may request OIDC tokens (`id-token: write`). If the plugin can use the provider's CLI login, log the CLI in there, as [Azure's](../providers/azure/ci/lib.sh) does, and run `prepare` before Packer.
 
 ### `README.md`
 
-Covers credentials (and the GitHub environment and its secrets), default location and server type, limits such as disk-size rules, prices, how image metadata is stored, and how to build and test locally. [Hetzner's](../providers/hetzner/README.md) is a template.
+Covers credentials (and the GitHub environment and its secrets), default location and server type, limits such as disk-size rules, prices, how image metadata is stored, and how to build and test locally. [Hetzner's](../providers/hetzner/README.md) is a template; [Azure's](../providers/azure/README.md) adds an OIDC login and resources that `prepare` creates.
 
 ## Checklist
 
 1. Create `providers/<name>/source.pkr.hcl` as described above.
 2. Add the plugin to `packer/plugins.pkr.hcl` and `"source.<plugin>.ubuntu"` to the `sources` in `packer/build.pkr.hcl`.
-3. Write `ci/credentials` and the seven `ci/` scripts. Make the scripts executable.
+3. Write `ci/credentials` and the seven `ci/` scripts, and `ci/prepare` if the build needs something to exist first. Make the scripts executable.
 4. Write `README.md`.
 5. Run `./build.sh validate` and the [lint commands](../README.md#checks).
 6. Export the credentials, then run `./build.sh release <name>`: it builds, tests, promotes and prunes, the same as CI and the action.
 7. Check that the smoke test passes and that the image's labels or tags are right. Then check that `cleanup` deletes what a failed build leaves: run `./build.sh build <name>` and then `./build.sh cleanup <name>`, and confirm nothing is left.
 8. Create a GitHub environment named after the provider, with a secret for each name in `ci/credentials`, limited to the `main` branch.
 9. Add the provider's name to the `provider` matrix in `.github/workflows/build-image.yml`, then run the workflow manually with that provider.
-
-If the provider can only be reached with short-lived credentials from OIDC (common on AWS, Google Cloud and Azure), the workflow needs a login step for it, and that's more than one line. Long-lived keys in the environment work without workflow changes.
 
 ## Worked example: Scaleway
 

@@ -2,7 +2,7 @@
 
 Lean, reproducible VM images for self-hosted, ephemeral GitHub Actions runners.
 
-The images are built with [Packer](https://developer.hashicorp.com/packer). The software and system configuration live in one set of provisioning scripts that every provider shares. Each cloud provider only adds a small folder that says where to build, how to save the image and how to manage it. [Hetzner Cloud](https://www.hetzner.com/cloud) is the first provider; others can be added without touching the shared scripts.
+The images are built with [Packer](https://developer.hashicorp.com/packer). The software and system configuration live in one set of provisioning scripts that every provider shares. Each cloud provider only adds a small folder that says where to build, how to save the image and how to manage it. So far there are two, [Hetzner Cloud](https://www.hetzner.com/cloud) and [Azure](providers/azure/README.md); others can be added without touching the shared scripts.
 
 ## Goals
 
@@ -34,7 +34,7 @@ System configuration:
 - cloud-init's network hotplug turned off: Docker's interfaces would trigger it, and it fails on them
 - `/etc/runner-image/manifest.json`: version, commit, build date, base image and the version of every tool
 - `runner-jit.service`, which starts the runner when a launcher provides a JIT config (see [Start a runner](#start-a-runner))
-- cleaned before saving (machine ID, SSH host keys, cloud-init state, logs), so every server starts with its own identity; cloud-init sets up SSH keys, the hostname and user data on first boot
+- cleaned before saving (machine ID, SSH host keys, cloud-init state, logs, and the user the build logged in as if that wasn't root), so every server starts with its own identity; cloud-init sets up SSH keys, the hostname and user data on first boot
 
 The image uses about 4.4 GB of disk; a Hetzner snapshot of it is 1.24 GB.
 
@@ -48,6 +48,8 @@ export HCLOUD_TOKEN=...
 ```
 
 This builds a snapshot (3 to 4 minutes), tests it on a new server, labels it `channel=stable` and deletes all but the newest 2 stable images. If any step fails, it deletes everything it created.
+
+On Azure, log in with `az login` and set `AZURE_SUBSCRIPTION_ID` instead, then run `./build.sh release azure` (see [providers/azure](providers/azure/README.md)).
 
 ## Use it in your pipeline
 
@@ -92,7 +94,9 @@ jobs:
 
 The outputs are `image-id` (empty if the release failed), `version`, `image-size` and `output-dir`, the directory with `manifest.json`, `build.log`, `smoke.log`, `release.json` and `summary.md`. The summary also goes to the job summary. Any other setting is an environment variable, as for `build.sh`: the `PKR_VAR_<name>` variables in [Build locally](#build-locally) and the provider's README.
 
-The action runs [`build.sh release`](#build-locally). It needs `jq`, `curl`, `git` and `ssh`, which `ubuntu-latest` has, and the runner must reach the test server over SSH. If a step fails, or the job is cancelled, it deletes everything the build created.
+Azure needs no secret: the action logs in with the job's OIDC token, so the job needs `permissions: id-token: write` and the identity's IDs ([providers/azure](providers/azure/README.md#credentials) has a complete job).
+
+The action runs [`build.sh release`](#build-locally). It needs `jq`, `curl`, `git`, `ssh` and, for Azure, the Azure CLI, which `ubuntu-latest` has, and the runner must reach the test server over SSH. If a step fails, or the job is cancelled, it deletes everything the build created.
 
 ### Other CI systems
 
@@ -111,7 +115,7 @@ HCLOUD_TOKEN=... runner-images/build.sh release hetzner
 
 ## Start a runner
 
-The launcher (not part of this repository) creates a server from a `stable` image and passes a [JIT runner config](https://docs.github.com/en/rest/actions/self-hosted-runners#create-configuration-for-a-just-in-time-runner-for-a-repository) as cloud-init user data:
+The launcher (not part of this repository) creates a server from a `stable` image and passes a [JIT runner config](https://docs.github.com/en/rest/actions/self-hosted-runners#create-configuration-for-a-just-in-time-runner-for-a-repository) as cloud-init user data (on Azure, the VM's custom data):
 
 ```yaml
 #cloud-config
@@ -181,13 +185,13 @@ actionlint
 
 - **Validate** (every run): `packer fmt -check`, `packer validate` for every provider, shellcheck and actionlint. Pull requests stop here and never see a secret.
 - **Runner version**: fails the weekly run if the pinned runner is more than 21 days behind (see [Versions](#versions)).
-- **Build**, one matrix leg per provider. Each leg runs in a GitHub environment named after the provider, which holds that provider's secrets only. It uses the action in this repository (`uses: ./`), so CI runs exactly what other repositories run. `build.sh release` calls `providers/<name>/ci/*` for everything provider-specific:
+- **Build**, one matrix leg per provider. Each leg runs in a GitHub environment named after the provider, which holds that provider's secrets only, and may request an OIDC token, which Azure logs in with. It uses the action in this repository (`uses: ./`), so CI runs exactly what other repositories run. `build.sh release` calls `providers/<name>/ci/*` for everything provider-specific:
   1. build the image (version `YYYYMMDD.<run number>`)
   2. start a test server with a one-off SSH key, wait for SSH and run [`smoke.sh`](images/ubuntu/tests/smoke.sh) as `runner`
   3. delete the test server
   4. promote the image to `stable` and delete all but the newest 2 stable images
 
-  If any step fails, the provider's `cleanup` deletes everything this build created, found by its labels; the action runs it again even when the job was cancelled. The manifest and logs are uploaded as artifacts.
+  If any step fails, the provider's `cleanup` deletes everything this build created, found by its labels or tags; the action runs it again even when the job was cancelled. The manifest and logs are uploaded as artifacts.
 
 The job summary shows the result, image ID and size, build time, how long the test server took to accept SSH, and the smoke test output.
 
@@ -195,11 +199,12 @@ To add CI for a new provider, create a GitHub environment with its name and secr
 
 ## Providers
 
-A provider is one folder in [`providers/`](providers) with a Packer source, seven lifecycle scripts and a README. All provisioning is shared. [docs/adding-a-provider.md](docs/adding-a-provider.md) describes the interface, has a checklist, and checks the design against Scaleway.
+A provider is one folder in [`providers/`](providers) with a Packer source, seven lifecycle scripts (and an optional `prepare` script) and a README. All provisioning is shared. [docs/adding-a-provider.md](docs/adding-a-provider.md) describes the interface, has a checklist, and checks the design against Scaleway.
 
 | Provider | Image |
 |---|---|
 | [Hetzner Cloud](providers/hetzner/README.md) | snapshot, labelled |
+| [Azure](providers/azure/README.md) | Azure Compute Gallery image version, tagged |
 
 ## Versions
 
@@ -237,6 +242,7 @@ images/ubuntu/
   tests/                    smoke test, run on a server started from a new image
 providers/
   hetzner/                  Hetzner Cloud: Packer source, ci/ scripts, README
+  azure/                    Azure: Packer source, ci/ scripts, README
 docs/adding-a-provider.md   the provider interface and checklist
 .github/workflows/          build-image.yml
 renovate.json               version updates

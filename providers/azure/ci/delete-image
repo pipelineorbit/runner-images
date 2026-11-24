@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# delete-image <image-id>
+# Deletes the gallery image version. Succeeds if it is already gone.
+set -euo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+
+id=${1:?usage: delete-image <image-id>}
+
+log "deleting image version ${id##*/images/}"
+az sig image-version delete --ids "$id"

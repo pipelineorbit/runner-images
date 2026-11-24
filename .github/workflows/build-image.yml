@@ -79,11 +79,16 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # id-token: for providers that log in with GitHub's OIDC token instead of a
+    # long-lived secret (Azure).
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
         # Providers to build: the one picked in a manual run, otherwise all of these.
-        provider: ${{ fromJSON(inputs.provider && format('["{0}"]', inputs.provider) || '["hetzner"]') }}
+        provider: ${{ fromJSON(inputs.provider && format('["{0}"]', inputs.provider) || '["hetzner", "azure"]') }}
     # Holds the provider's secrets, so each leg only sees its own.
     environment: ${{ matrix.provider }}
     concurrency:
@@ -95,14 +100,21 @@ jobs:
       - uses: actions/checkout@v7
 
       # Exports the secrets that providers/<name>/ci/credentials lists, so this
-      # workflow doesn't need to know any provider's secret names.
+      # workflow doesn't need to know any provider's secret names. Names ending
+      # in ? are optional.
       - name: Load credentials from the ${{ matrix.provider }} environment
         env:
           SECRETS: ${{ toJSON(secrets) }}
         run: |
           while read -r name; do
+            optional=false
+            if [[ $name == *'?' ]]; then
+              name=${name%'?'}
+              optional=true
+            fi
             value=$(jq -r --arg name "$name" '.[$name] // empty' <<<"$SECRETS")
             if [[ -z $value ]]; then
+              $optional && continue
               echo "::error::Secret $name is missing from the $PROVIDER environment (see providers/$PROVIDER/README.md)"
               exit 1
             fi

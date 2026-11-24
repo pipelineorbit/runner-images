@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# prune <keep>
+# Deletes the stable image versions of this image (same Ubuntu version and
+# arch) except the newest <keep>.
+set -euo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+
+keep=${1:?usage: prune <keep>}
+[[ $keep =~ ^[0-9]+$ ]] || die "keep must be a number, not '$keep'"
+
+az sig image-version list --resource-group "$resource_group" --gallery-name "$gallery" \
+  --gallery-image-definition "$definition" --output json |
+  jq -r --argjson keep "$keep" '[.[] | select(.tags.channel == "stable")]
+    | sort_by(.publishingProfile.publishedDate) | reverse | .[$keep:][] | .id' |
+  while read -r id; do
+    "$(dirname "$0")/delete-image" "$id"
+  done

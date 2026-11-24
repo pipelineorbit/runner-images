@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# create-test-server <image-id> <ssh-pubkey-file>
+# Starts a VM from the gallery image version and prints "<vm-name> <public-ip>".
+# The key is added for the runner user through cloud-init user data (Azure's
+# custom data), which the smoke test relies on to log in.
+set -euo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+
+usage="usage: create-test-server <image-id> <ssh-pubkey-file>"
+image=${1:?$usage}
+pubkey=${2:?$usage}
+
+# Named and tagged after the image's version and arch, so ci/cleanup finds the
+# VM and what's created with it if this run is killed before it deletes them.
+tags=$(az sig image-version show --ids "$image" --query tags --output json)
+version=$(jq -r '.version // empty' <<<"$tags")
+image_arch=$(jq -r '.arch // empty' <<<"$tags")
+[[ -n $version && -n $image_arch ]] || die "image $image has no version or arch tag"
+name="smoke-$(name_of "$(jq -r .image <<<"$tags")" "$image_arch" "$version")"
+size=$(vm_size "$image_arch")
+
+user_data=$(mktemp)
+trap 'rm -f "$user_data"' EXIT
+cat >"$user_data" <<EOF
+#cloud-config
+users:
+  - default
+  - name: runner
+    ssh_authorized_keys:
+      - $(cat "$pubkey")
+EOF
+
+# Azure requires an admin user, which gets the same key. Trusted Launch (Secure
+# Boot and a vTPM) is Azure's default for new VMs, and checks that the image
+# still boots with Secure Boot. The network interface and OS disk go when the
+# VM is deleted; delete-server deletes the public IP and security group, which
+# are named after the VM.
+if ! vm=$(az vm create --resource-group "$resource_group" --name "$name" --image "$image" \
+  --size "$size" --admin-username azureuser --ssh-key-values "$pubkey" --custom-data "$user_data" \
+  --security-type TrustedLaunch --enable-secure-boot true --enable-vtpm true \
+  --vnet-name "$network" --subnet "$subnet" --public-ip-address "$name-ip" --public-ip-sku Standard \
+  --nsg "$name-nsg" --nsg-rule SSH --os-disk-name "$name-osdisk" \
+  --os-disk-delete-option Delete --nic-delete-option Delete \
+  --tags purpose=image-smoke-test "version=$version" "arch=$image_arch" --output json); then
+  "$(dirname "$0")/delete-server" "$name" || true
+  die "could not create a $size VM from $image"
+fi
+jq -r --arg name "$name" '"\($name) \(.publicIpAddress)"' <<<"$vm"

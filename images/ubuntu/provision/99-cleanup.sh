@@ -22,6 +22,14 @@ truncate -s 0 /etc/machine-id
 rm -f /var/lib/systemd/random-seed /etc/ssh/ssh_host_*
 # The key the provider added for the build must not open servers made from the image.
 rm -f /root/.ssh/authorized_keys /home/runner/.ssh/authorized_keys
+# Providers that don't allow root logins (Azure) build as a user that cloud-init
+# created, with passwordless sudo. Servers started from the image get their own
+# login user from cloud-init, so delete the build's.
+if [[ -n ${BUILD_USER:-} && $BUILD_USER != root && $BUILD_USER != runner ]] && id "$BUILD_USER" >/dev/null 2>&1; then
+  log "removing the build user $BUILD_USER"
+  userdel --force --remove "$BUILD_USER"
+fi
+rm -f /etc/sudoers.d/90-cloud-init-users
 rm -rf /var/lib/dhcp/* /var/lib/dhcpcd/*
 
 log "clearing shell history, caches and logs written during the build"

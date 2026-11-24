@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# promote <image-id>
+# Tags the gallery image version channel=stable and lets it count as the image
+# definition's latest version. Also removes the purpose tag it got from the
+# builder's tags.
+set -euo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+
+id=${1:?usage: promote <image-id>}
+
+# az sig image-version update doesn't take --ids, so split the ID:
+# <group>/providers/Microsoft.Compute/galleries/<gallery>/images/<definition>/versions/<version>
+IFS=/ read -r -a part <<<"${id#*/resourceGroups/}"
+az sig image-version update --resource-group "${part[0]}" --gallery-name "${part[4]}" \
+  --gallery-image-definition "${part[6]}" --gallery-image-version "${part[8]}" \
+  --set publishingProfile.excludeFromLatest=false tags.channel=stable --remove tags.purpose --output none

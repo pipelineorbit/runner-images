@@ -8,12 +8,13 @@
 #   ./build.sh cleanup <provider> [version] delete what a failed or cancelled build left behind
 #
 # The provider's credentials come from its environment variables, listed in
-# providers/<provider>/ci/credentials. Settings are Packer variables: set them as
-# PKR_VAR_<name> environment variables (or -var name=value with build). This
-# script sets image_version (today's date + ".0") and commit (git HEAD) unless
-# PKR_VAR_image_version or PKR_VAR_commit is set. release keeps the newest
-# KEEP_STABLE_IMAGES (default 2) stable images, and deletes everything it
-# created if any step fails.
+# providers/<provider>/ci/credentials. If the provider has a ci/prepare script,
+# build and release run it before Packer. Settings are Packer variables: set
+# them as PKR_VAR_<name> environment variables (or -var name=value with build).
+# This script sets image_version (today's date + ".0") and commit (git HEAD)
+# unless PKR_VAR_image_version or PKR_VAR_commit is set. release keeps the
+# newest KEEP_STABLE_IMAGES (default 2) stable images, and deletes everything
+# it created if any step fails.
 #
 # Packer reads a single directory, so this copies packer/*.pkr.hcl and
 # providers/*/source.pkr.hcl into output/packer/ and runs Packer from the
@@ -46,12 +47,13 @@ plugin_of() {
   echo "$plugin"
 }
 
-# Prints the names of the environment variables that hold a provider's credentials.
+# Prints the names of the environment variables that must hold a provider's
+# credentials. Names ending in ? are optional and left out.
 credentials_of() {
-  grep -v -e '^#' -e '^[[:space:]]*$' "providers/$1/ci/credentials"
+  grep -v -e '^#' -e '^[[:space:]]*$' -e '?$' "providers/$1/ci/credentials"
 }
 
-# Fails unless all of a provider's credentials are set.
+# Fails unless all of a provider's required credentials are set.
 require_credentials() {
   local name
   for name in $(credentials_of "$1"); do
@@ -97,6 +99,12 @@ build() {
   require_credentials "$provider"
   assemble
   rm -f output/manifest.json output/build.log
+
+  # Whatever the provider needs before Packer runs, such as a gallery to publish to.
+  if [[ -x providers/$provider/ci/prepare ]]; then
+    echo "Preparing $provider"
+    "providers/$provider/ci/prepare"
+  fi
 
   echo "Building $provider image $PKR_VAR_image_version from ${PKR_VAR_commit:0:12}"
   SECONDS=0
@@ -161,7 +169,7 @@ release_finish() {
 
 # Writes output/release.json and output/summary.md (CI shows it as the job summary).
 write_summary() {
-  local status=$1 result build_time ssh_ready smoke
+  local status=$1 result build_time ssh_ready smoke size
   if [[ -n $promoted ]]; then
     result=stable
   elif [[ -n $image_id ]]; then
@@ -172,6 +180,9 @@ write_summary() {
   build_time=$(sed -n 's/^Build took //p' output/build.log 2>/dev/null)
   ssh_ready=$(sed -n 's/^ssh_ready_seconds=//p' output/smoke.log 2>/dev/null)
   smoke=$(sed -n 's/^smoke test: //p' output/smoke.log 2>/dev/null)
+  # find-image prints - if the provider doesn't report the size.
+  size="${image_size:-?} GB"
+  [[ $image_size != - ]] || size="not reported"
 
   jq -n --arg provider "$release_provider" --arg version "$PKR_VAR_image_version" \
     --arg commit "$PKR_VAR_commit" --arg image_id "$image_id" --arg image_size "$image_size" \
@@ -188,7 +199,7 @@ write_summary() {
     echo "|---|---|"
     echo "| Result | $result |"
     echo "| Image ID | ${image_id:-none} |"
-    echo "| Image size | ${image_size:-?} GB |"
+    echo "| Image size | $size |"
     echo "| Ubuntu | ${PKR_VAR_ubuntu_version:-26.04}, ${PKR_VAR_arch:-x86_64} |"
     echo "| Commit | \`${PKR_VAR_commit:0:12}\` |"
     echo "| Build time | ${build_time:-?} |"

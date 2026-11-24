@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# delete-server <vm-name>
+# Deletes the VM and what create-test-server created with it: its network
+# interface (<vm-name>VMNic), public IP, security group and OS disk
+# (<vm-name>-*). Succeeds if they're already gone.
+set -euo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+
+name=${1:?usage: delete-server <vm-name>}
+
+resources | jq -r --arg name "$name" \
+  '.[] | select(.name == $name or .name == $name + "VMNic" or (.name | startswith($name + "-"))) | .id' |
+  delete_resources

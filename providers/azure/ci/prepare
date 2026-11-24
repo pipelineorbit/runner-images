@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# prepare
+# Runs before every build. Creates what Packer needs but doesn't create, unless
+# it exists: the resource group (in PKR_VAR_azure_location), the gallery, the
+# image definition for this Ubuntu release and arch, and a network for the
+# builder and test VMs. They all go in the resource group's region.
+set -euo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+
+if [[ $(az group exists --name "$resource_group") != true ]]; then
+  log "creating resource group $resource_group in $location"
+  az group create --name "$resource_group" --location "$location" --output none
+fi
+region=$(az group show --name "$resource_group" --query location --output tsv)
+
+if ! az sig show --resource-group "$resource_group" --gallery-name "$gallery" --output none 2>/dev/null; then
+  log "creating gallery $gallery in $region"
+  az sig create --resource-group "$resource_group" --gallery-name "$gallery" --location "$region" \
+    --description "Runner images, built with https://github.com/pipelineorbit/runner-images" --output none
+fi
+
+if ! az sig image-definition show --resource-group "$resource_group" --gallery-name "$gallery" \
+  --gallery-image-definition "$definition" --output none 2>/dev/null; then
+  log "creating image definition $definition"
+  # The features of Canonical's image, except hibernation, so VMs can use
+  # Trusted Launch, accelerated networking and NVMe disks.
+  az sig image-definition create --resource-group "$resource_group" --gallery-name "$gallery" \
+    --gallery-image-definition "$definition" --location "$region" \
+    --publisher runner-images --offer "$image_os" --sku "$arch" \
+    --os-type Linux --os-state Generalized --hyper-v-generation V2 \
+    --architecture "$(if [[ $arch == arm64 ]]; then echo Arm64; else echo x64; fi)" \
+    --features "SecurityType=TrustedLaunchSupported IsAcceleratedNetworkSupported=True DiskControllerTypes=SCSI,NVMe" \
+    --output none
+fi
+
+# The network that builder and test VMs join. Its subnet is private (no default
+# outbound access): each VM reaches the internet through its own public IP.
+# Created in two steps, because a policy may deny new subnets that aren't private.
+if ! az network vnet show --resource-group "$resource_group" --name "$network" --output none 2>/dev/null; then
+  log "creating network $network"
+  az network vnet create --resource-group "$resource_group" --name "$network" --location "$region" \
+    --address-prefixes 10.0.0.0/24 --output none
+fi
+if ! az network vnet subnet show --resource-group "$resource_group" --vnet-name "$network" \
+  --name "$subnet" --output none 2>/dev/null; then
+  log "creating subnet $subnet"
+  az network vnet subnet create --resource-group "$resource_group" --vnet-name "$network" \
+    --name "$subnet" --address-prefixes 10.0.0.0/24 --default-outbound-access false --output none
+fi

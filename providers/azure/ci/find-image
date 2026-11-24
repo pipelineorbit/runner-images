@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# find-image <version>
+# Prints "<image-id> -" for the gallery image version of that version. The
+# image ID is the version's resource ID. The size is "-": Azure bills the space
+# the image occupies, which it doesn't report.
+set -euo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+
+version=${1:?usage: find-image <version>}
+
+id=$(az sig image-version show --resource-group "$resource_group" --gallery-name "$gallery" \
+  --gallery-image-definition "$definition" --gallery-image-version "$version.0" \
+  --query id --output tsv) || die "no image version $version.0 in $gallery/$definition"
+echo "$id -"
