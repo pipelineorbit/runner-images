@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Runs one job with the just-in-time (JIT) runner config in
+# /etc/runner-image/jitconfig, then powers the server off if
+# /etc/runner-image/poweroff-after-job exists. Started by runner-jit.service.
+set -euo pipefail
+
+config=/etc/runner-image/jitconfig
+jitconfig=$(<"$config")
+# The JIT config is a credential, so remove it before the job starts.
+rm -f "$config"
+
+# Same as `./run.sh --jitconfig <value>`, but passed in the environment so the
+# value doesn't appear in `ps` output, which a job could print to its log.
+status=0
+cd /home/runner/actions-runner
+ACTIONS_RUNNER_INPUT_JITCONFIG=$jitconfig runuser -u runner -- ./run.sh || status=$?
+echo "The runner exited with status $status."
+
+if [[ -e /etc/runner-image/poweroff-after-job ]]; then
+  echo "Powering off, because /etc/runner-image/poweroff-after-job exists."
+  systemctl poweroff
+fi
+exit "$status"

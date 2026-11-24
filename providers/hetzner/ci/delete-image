@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# delete-image <image-id>
+# Deletes the snapshot. Succeeds if it is already gone.
+set -euo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+
+id=${1:?usage: delete-image <image-id>}
+
+if output=$(hcloud image delete "$id" 2>&1); then
+  echo "$output"
+elif grep -qi 'not found' <<<"$output"; then
+  echo "snapshot $id is already gone"
+else
+  die "$output"
+fi

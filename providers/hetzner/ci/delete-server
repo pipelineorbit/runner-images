@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# delete-server <server-id>
+# Deletes the server. Succeeds if it is already gone.
+set -euo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+
+id=${1:?usage: delete-server <server-id>}
+
+if output=$(hcloud server delete "$id" 2>&1); then
+  echo "$output"
+elif grep -qi 'not found' <<<"$output"; then
+  echo "server $id is already gone"
+else
+  die "$output"
+fi

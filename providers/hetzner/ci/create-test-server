@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# create-test-server <image-id> <ssh-pubkey-file>
+# Starts a server from the snapshot and prints "<server-id> <ipv4>". The key is
+# added for the runner user through cloud-init user data, which the smoke test
+# relies on to log in.
+set -euo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+
+usage="usage: create-test-server <image-id> <ssh-pubkey-file>"
+image=${1:?$usage}
+pubkey=${2:?$usage}
+
+# Same defaults as source.pkr.hcl, so the snapshot fits the server's disk.
+location=${PKR_VAR_hetzner_location:-hel1}
+if [[ -n ${PKR_VAR_hetzner_server_type:-} ]]; then
+  type=$PKR_VAR_hetzner_server_type
+elif [[ $(hcloud image describe "$image" -o json | jq -r .architecture) == arm ]]; then
+  type=cax11
+else
+  type=ccx13
+fi
+name="smoke-$image-$(date +%s)"
+
+user_data=$(mktemp)
+cleanup() {
+  rm -f "$user_data"
+  hcloud ssh-key delete "$name" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+cat >"$user_data" <<EOF
+#cloud-config
+users:
+  - default
+  - name: runner
+    ssh_authorized_keys:
+      - $(cat "$pubkey")
+EOF
+
+# Hetzner sets a root password when a server has no SSH key, so give it the
+# same key through a temporary key object. It's only needed during creation.
+hcloud ssh-key create --name "$name" --public-key-from-file "$pubkey" \
+  --label purpose=image-smoke-test >/dev/null
+
+if ! server=$(hcloud server create --name "$name" --image "$image" --type "$type" \
+  --location "$location" --ssh-key "$name" --user-data-from-file "$user_data" \
+  --label purpose=image-smoke-test -o json); then
+  # The server can exist even though the command failed.
+  hcloud server delete "$name" >/dev/null 2>&1 || true
+  die "could not create a $type server from snapshot $image in $location"
+fi
+jq -r '"\(.server.id) \(.server.public_net.ipv4.ip)"' <<<"$server"

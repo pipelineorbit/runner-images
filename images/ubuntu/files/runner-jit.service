@@ -1,0 +1,20 @@
+# Runs one job with the just-in-time (JIT) runner config that a launcher wrote
+# to /etc/runner-image/jitconfig (for example with cloud-init write_files).
+# Without that file it does nothing. Installed by provision/60-boot-hook.sh.
+[Unit]
+Description=GitHub Actions runner with a just-in-time config
+ConditionPathExists=/etc/runner-image/jitconfig
+# Start once cloud-init has written files and run the launcher's scripts.
+After=cloud-final.service network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/libexec/runner-image/runner-jit
+# ImageOS, ImageVersion, RUNNER_TOOL_CACHE, AGENT_TOOLSDIRECTORY and PATH.
+EnvironmentFile=/etc/environment
+
+[Install]
+# Not multi-user.target: on Ubuntu, cloud-final.service is ordered after it,
+# which would make a cycle.
+WantedBy=cloud-init.target

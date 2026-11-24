@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Prints "<tool> <version>" for every tool in the image, one per line. The
+# build stores the output in /etc/runner-image/manifest.json, and the smoke
+# test runs it again on a new server and compares. Fails if a tool doesn't run.
+set -euo pipefail
+
+# version <name> <command...>: prints the first dotted number in the command's output.
+version() {
+  local name=$1 output number
+  shift
+  if ! output=$("$@" 2>&1); then
+    echo "tool-versions: '$*' failed: $output" >&2
+    return 1
+  fi
+  number=$(grep -oE '[0-9]+(\.[0-9]+)+' <<<"$output" | awk 'NR == 1')
+  if [[ -z $number ]]; then
+    echo "tool-versions: no version in the output of '$*'" >&2
+    return 1
+  fi
+  echo "$name $number"
+}
+
+# The runner writes a log to its _diag directory, so it must run as the runner
+# user: a root-owned _diag would stop it from starting later.
+as_runner() {
+  if [[ $(id -u) -eq 0 ]]; then
+    runuser -u runner -- "$@"
+  else
+    "$@"
+  fi
+}
+
+version git git --version
+version git-lfs git lfs version
+version curl curl --version
+version wget wget --version
+version jq jq --version
+version zip zip -v
+version unzip unzip -v
+version tar tar --version
+version zstd zstd --version
+version xz xz --version
+version rsync rsync --version
+version openssh ssh -V
+version gcc gcc -dumpfullversion
+version make make --version
+version pkg-config pkg-config --version
+version python3 python3 --version
+version pip python3 -m pip --version
+version actions-runner as_runner /home/runner/actions-runner/bin/Runner.Listener --version
+version docker docker --version
+version containerd containerd --version
+version docker-buildx docker buildx version
+version docker-compose docker compose version
+version gh gh --version
+version aws-cli aws --version
+version gcloud gcloud version
+version azure-cli az version --query '"azure-cli"' --output tsv

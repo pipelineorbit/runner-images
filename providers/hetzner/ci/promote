@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# promote <image-id>
+# Labels the snapshot channel=stable.
+set -euo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+
+id=${1:?usage: promote <image-id>}
+
+hcloud image add-label --overwrite "$id" channel=stable

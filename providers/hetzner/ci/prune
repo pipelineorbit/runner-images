@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# prune <keep>
+# Deletes the stable snapshots of this image (same Ubuntu version and arch)
+# except the newest <keep>.
+set -euo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
+
+keep=${1:?usage: prune <keep>}
+[[ $keep =~ ^[0-9]+$ ]] || die "keep must be a number, not '$keep'"
+
+hcloud image list --type snapshot --selector "$family,channel=stable" -o json |
+  jq -r --argjson keep "$keep" 'sort_by(.created) | reverse | .[$keep:][] | "\(.id) \(.description)"' |
+  while read -r id description; do
+    echo "deleting snapshot $id ($description)"
+    hcloud image delete "$id"
+  done

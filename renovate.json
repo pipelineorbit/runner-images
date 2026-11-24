@@ -1,0 +1,36 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Versions pinned below a `# renovate:` comment",
+      "managerFilePatterns": [
+        "/^images/ubuntu/versions\\.env$/",
+        "/^providers/[^/]+/ci/lib\\.sh$/",
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: registryUrl=(?<registryUrl>\\S+))?(?: extractVersion=(?<extractVersion>\\S+))?\\s*\\n\\s*[A-Z0-9_]+(?:=|:\\s*)\"?(?<currentValue>[^\"\\s]+)\"?"
+      ]
+    },
+    {
+      "customType": "regex",
+      "description": "Packer plugins in packer/plugins.pkr.hcl",
+      "managerFilePatterns": ["/^packer/plugins\\.pkr\\.hcl$/"],
+      "matchStrings": [
+        "source\\s*=\\s*\"github\\.com/(?<owner>[^/\"]+)/(?<plugin>[^/\"]+)\"\\s*\\n\\s*version\\s*=\\s*\"(?<currentValue>[^\"]+)\""
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "{{{owner}}}/packer-plugin-{{{plugin}}}",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Docker Engine and its plugins in one PR",
+      "matchDepNames": ["docker-ce", "containerd.io", "docker-buildx-plugin", "docker-compose-plugin"],
+      "groupName": "Docker"
+    }
+  ]
+}

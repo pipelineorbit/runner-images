@@ -1,0 +1,2 @@
+# Passwordless sudo for the runner user, as on GitHub-hosted runners.
+runner ALL=(ALL) NOPASSWD:ALL
