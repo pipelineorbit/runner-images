@@ -4,7 +4,8 @@
 # version becomes available, and at once if a critical security fix needs it.
 # A version becomes available on or after its release date, so counting from the
 # first release after the pinned one is the safe side. Set GITHUB_TOKEN to avoid
-# GitHub API rate limits.
+# GitHub API rate limits, and ANNOTATION=warning to report it as a GitHub Actions
+# warning instead of an error.
 set -euo pipefail
 
 max_days=${MAX_DAYS:-21}
@@ -36,7 +37,7 @@ days=$(jq -n --arg date "$published" '(now - ($date | fromdateiso8601)) / 86400 
 message="actions/runner $RUNNER_VERSION is $days days behind: $first was released on ${published%%T*} (latest is $latest)."
 
 if ((days > max_days)); then
-  echo "::error title=Runner version is too old::$message GitHub stops assigning jobs to runners 63 days after a newer version becomes available. Update RUNNER_VERSION in images/ubuntu/versions.env."
+  echo "::${ANNOTATION:-error} title=Runner version is too old::$message GitHub stops assigning jobs to runners 63 days after a newer version becomes available. Update RUNNER_VERSION in images/ubuntu/versions.env."
   exit 1
 fi
 echo "$message The limit is $max_days days."

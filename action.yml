@@ -1,0 +1,113 @@
+name: Runner image
+description: >-
+  Builds an Ubuntu image for ephemeral self-hosted GitHub Actions runners in your
+  cloud account, tests it on a new server, labels it stable and deletes old ones.
+author: pipelineorbit
+
+inputs:
+  provider:
+    description: >-
+      Cloud provider: a folder in providers/, for example hetzner. Pass its
+      credentials as environment variables (see providers/<provider>/README.md).
+    required: true
+  ubuntu-version:
+    description: Ubuntu LTS release.
+    required: false
+    default: "26.04"
+  arch:
+    description: CPU architecture, x86_64 or arm64.
+    required: false
+    default: x86_64
+  keep:
+    description: How many stable images of this Ubuntu release and architecture to keep.
+    required: false
+    default: "2"
+  packer-version:
+    description: Packer version to install.
+    required: false
+    # renovate: datasource=github-releases depName=hashicorp/packer extractVersion=^v(?<version>.+)$
+    default: "1.16.2"
+
+outputs:
+  image-id:
+    description: ID of the new stable image. Empty if the release failed.
+    value: ${{ steps.report.outputs.image-id }}
+  version:
+    description: Version of the image, YYYYMMDD.N.
+    value: ${{ steps.settings.outputs.version }}
+  image-size:
+    description: Size of the image in GB, as the provider bills it.
+    value: ${{ steps.report.outputs.image-size }}
+  output-dir:
+    description: Directory with manifest.json, build.log, smoke.log, release.json and summary.md.
+    value: ${{ steps.report.outputs.output-dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Packer
+      uses: hashicorp/setup-packer@v3
+      with:
+        version: ${{ inputs.packer-version }}
+
+    - name: Settings
+      id: settings
+      shell: bash
+      env:
+        ACTION_REPOSITORY: ${{ github.action_repository }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        # YYYYMMDD.<run number>, unless PKR_VAR_image_version is set.
+        echo "version=${PKR_VAR_image_version:-$(date -u +%Y%m%d).$GITHUB_RUN_NUMBER}" >>"$GITHUB_OUTPUT"
+        # The commit of this repository that builds the image, unless PKR_VAR_commit
+        # is set. Inside its own repository (uses: ./), build.sh asks git.
+        commit=${PKR_VAR_commit:-}
+        if [[ -z $commit && -n $ACTION_REPOSITORY ]]; then
+          if [[ $ACTION_REF =~ ^[0-9a-f]{40}$ ]]; then
+            commit=$ACTION_REF
+          else
+            commit=$(git ls-remote "https://github.com/$ACTION_REPOSITORY" "$ACTION_REF" "$ACTION_REF^{}" | awk 'END { print $1 }') || true
+          fi
+        fi
+        echo "commit=$commit" >>"$GITHUB_OUTPUT"
+
+    - name: Build, test and release
+      id: release
+      shell: bash
+      env:
+        PROVIDER: ${{ inputs.provider }}
+        PKR_VAR_image_version: ${{ steps.settings.outputs.version }}
+        PKR_VAR_commit: ${{ steps.settings.outputs.commit }}
+        PKR_VAR_ubuntu_version: ${{ inputs.ubuntu-version }}
+        PKR_VAR_arch: ${{ inputs.arch }}
+        KEEP_STABLE_IMAGES: ${{ inputs.keep }}
+        # packer init and the runner version check use the GitHub API.
+        PACKER_GITHUB_API_TOKEN: ${{ github.token }}
+        GITHUB_TOKEN: ${{ github.token }}
+      # exec, so that a cancelled job signals build.sh itself.
+      run: exec "$GITHUB_ACTION_PATH/build.sh" release "$PROVIDER"
+
+    # build.sh deletes what a failed release created. A cancelled job kills it,
+    # so delete leftovers again here: steps with always() still run then.
+    - name: Clean up
+      if: always() && (steps.release.outcome == 'failure' || steps.release.outcome == 'cancelled')
+      shell: bash
+      env:
+        PROVIDER: ${{ inputs.provider }}
+        PKR_VAR_image_version: ${{ steps.settings.outputs.version }}
+        PKR_VAR_ubuntu_version: ${{ inputs.ubuntu-version }}
+        PKR_VAR_arch: ${{ inputs.arch }}
+      run: '"$GITHUB_ACTION_PATH/build.sh" cleanup "$PROVIDER"'
+
+    - name: Report
+      id: report
+      if: always()
+      shell: bash
+      run: |
+        out="$GITHUB_ACTION_PATH/output"
+        echo "output-dir=$out" >>"$GITHUB_OUTPUT"
+        if [[ -f $out/release.json ]]; then
+          jq -r '"image-id=\(if .result == "stable" then .image_id else "" end)", "image-size=\(.image_size_gb)"' \
+            "$out/release.json" >>"$GITHUB_OUTPUT"
+          cat "$out/summary.md" >>"$GITHUB_STEP_SUMMARY"
+        fi

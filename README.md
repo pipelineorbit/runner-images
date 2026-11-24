@@ -9,7 +9,7 @@ The images are built with [Packer](https://developer.hashicorp.com/packer). The 
 - **Small.** A few GB instead of the ~50 GB GitHub-hosted image, so snapshots are cheap and servers start fast.
 - **Generic.** Provider-specific code stays in its own folder. The software list, versions and system tuning are shared.
 - **Pinned and repeatable.** Tool versions live in one file, so every change to the image is a reviewable diff.
-- **Ephemeral-first.** Each server runs one job and is then deleted. Runners register with just-in-time (JIT) configuration, so no long-lived registration token is stored on the image.
+- **Ephemeral-first.** Each server runs one job, then is rebuilt from the image or deleted, so no job sees what an earlier one left behind. Runners register with just-in-time (JIT) configuration, so no long-lived registration token is stored on the image.
 
 ## What goes in the image
 
@@ -40,14 +40,74 @@ The image uses about 4.4 GB of disk; a Hetzner snapshot of it is 1.24 GB.
 
 ## Quick start
 
-You need [Packer](https://developer.hashicorp.com/packer/install) 1.11 or later, `jq`, an SSH client and a Hetzner Cloud API token.
+You need [Packer](https://developer.hashicorp.com/packer/install) 1.11 or later, `jq`, `curl`, an SSH client and a Hetzner Cloud API token.
 
 ```sh
 export HCLOUD_TOKEN=...
-./build.sh build hetzner
+./build.sh release hetzner
 ```
 
-This builds a snapshot labelled `channel=candidate` in 3 to 4 minutes. Test it and promote it to `stable` as described in [providers/hetzner](providers/hetzner/README.md#build-locally).
+This builds a snapshot (3 to 4 minutes), tests it on a new server, labels it `channel=stable` and deletes all but the newest 2 stable images. If any step fails, it deletes everything it created.
+
+## Use it in your pipeline
+
+Build the image in your own cloud account, from your own pipeline and on your own schedule. A run needs only the provider's name and the provider's credentials as environment variables; everything else is pinned in this repository.
+
+### GitHub Actions
+
+This repository is an action:
+
+```yaml
+name: Runner image
+
+on:
+  schedule:
+    - cron: "0 4 * * 1" # weekly, for security updates and new runner versions
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: pipelineorbit/runner-images@main
+        with:
+          provider: hetzner
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+          # Optional provider settings, for example:
+          # PKR_VAR_hetzner_location: fsn1
+```
+
+| Input | Default | |
+|---|---|---|
+| `provider` | required | a folder in [`providers/`](providers); its README lists the credentials |
+| `ubuntu-version` | `26.04` | Ubuntu LTS release |
+| `arch` | `x86_64` | `x86_64` or `arm64` |
+| `keep` | `2` | how many stable images to keep |
+| `packer-version` | pinned | Packer version to install |
+
+The outputs are `image-id` (empty if the release failed), `version`, `image-size` and `output-dir`, the directory with `manifest.json`, `build.log`, `smoke.log`, `release.json` and `summary.md`. The summary also goes to the job summary. Any other setting is an environment variable, as for `build.sh`: the `PKR_VAR_<name>` variables in [Build locally](#build-locally) and the provider's README.
+
+The action runs [`build.sh release`](#build-locally). It needs `jq`, `curl`, `git` and `ssh`, which `ubuntu-latest` has, and the runner must reach the test server over SSH. If a step fails, or the job is cancelled, it deletes everything the build created.
+
+### Other CI systems
+
+Run the same command the action runs:
+
+```sh
+git clone --depth 1 https://github.com/pipelineorbit/runner-images
+HCLOUD_TOKEN=... runner-images/build.sh release hetzner
+```
+
+`build.sh` exits non-zero if the release failed, after deleting what it created. If the job is killed before it can, run `build.sh cleanup <provider> <version>` with the version from the log.
+
+### Staying up to date
+
+`@main` always has the latest tested versions. If you pin a commit instead, so you can review what runs with your cloud credentials, update it at least monthly: the runner version is pinned in this repository, and GitHub stops sending jobs to a runner 63 days after a newer runner is released. `build.sh release` warns when the pinned runner is more than 21 days behind.
 
 ## Start a runner
 
@@ -66,16 +126,33 @@ write_files:
 
 At boot, `runner-jit.service` waits for cloud-init to finish, reads and deletes `/etc/runner-image/jitconfig`, and runs the runner once as the `runner` user. If `/etc/runner-image/poweroff-after-job` exists, it then powers the server off, so the launcher knows it can delete it. Without a JIT config the service does nothing. The image never contains a registration token and never reads a provider's metadata service.
 
+### Reusing a server
+
+Instead of deleting a server after its job, a launcher can rebuild it from the image, which wipes its disk. On providers that bill by the hour, this saves paying for a new server for every job. The rebuilt server needs the next job's JIT config, which it can get in two ways:
+
+- **In the rebuild's user data,** as above. This is no faster than starting a new server, because the provider writes the image to the disk and the server boots again.
+- **Over SSH.** Rebuild right after the job, with user data that has no JIT config, so the server boots and waits. When the next job is queued, start the runner:
+
+  ```sh
+  ssh root@<server> 'umask 077 && cat > /etc/runner-image/jitconfig && systemctl start runner-jit.service' <<<"$encoded_jit_config"
+  ```
+
+  The config travels on stdin, so it doesn't show up in process lists. The runner picks up the job a few seconds later.
+
+Always pass user data when rebuilding: a provider may otherwise apply the previous user data again, including a JIT config that was already used. Each rebuild also creates new SSH host keys, so the launcher has to trust a new host key every time. [providers/hetzner](providers/hetzner/README.md#reusing-a-server) has measured times.
+
 ## Build locally
 
 ```sh
-./build.sh validate [provider]          # packer fmt -check and packer validate, all providers by default
-./build.sh build <provider> [args...]   # build; extra arguments go to `packer build`
+./build.sh validate [provider]           # packer fmt -check and packer validate, all providers by default
+./build.sh build <provider> [args...]    # build only, leaving a candidate image; extra arguments go to `packer build`
+./build.sh release <provider>            # build, test, promote and prune: what CI and the action run
+./build.sh cleanup <provider> [version]  # delete what a failed or killed build of that version left behind
 ```
 
-Packer reads a single directory, so `build.sh` copies `packer/*.pkr.hcl` and every `providers/*/source.pkr.hcl` into `output/packer/` and runs Packer there. It selects the provider with `-only='*.<plugin>.*'`. The build writes `output/manifest.json` and `output/build.log`.
+Packer reads a single directory, so `build.sh` copies `packer/*.pkr.hcl` and every `providers/*/source.pkr.hcl` into `output/packer/` and runs Packer there. It selects the provider with `-only='*.<plugin>.*'`. The build writes `output/manifest.json` and `output/build.log`; `release` adds `smoke.log`, `release.json` and `summary.md`, and keeps the newest `KEEP_STABLE_IMAGES` (default 2) stable images.
 
-Settings are Packer variables. Pass them as `-var name=value` or set `PKR_VAR_<name>`:
+Settings are Packer variables. Pass them as `-var name=value` (with `build`) or set `PKR_VAR_<name>`:
 
 | Variable | Default | |
 |---|---|---|
@@ -83,7 +160,7 @@ Settings are Packer variables. Pass them as `-var name=value` or set `PKR_VAR_<n
 | `arch` | `x86_64` | `x86_64` or `arm64` |
 | `swap_size_gb` | `4` | `0` for no swap |
 | `tmp_mode` | `disk` | `disk` or `tmpfs` |
-| `image_version` | today + `.0` | `YYYYMMDD.N`; CI uses the run number as N |
+| `image_version` | today + `.0` | `YYYYMMDD.N`; the action uses the run number as N |
 | `commit` | `git rev-parse HEAD` | with `-dirty` if the working tree has changes |
 
 Providers add their own variables, such as `hetzner_location`; see their READMEs.
@@ -100,24 +177,25 @@ actionlint
 
 ## How CI works
 
-[`.github/workflows/build-image.yml`](.github/workflows/build-image.yml) runs on pull requests, on pushes to `main` that change `packer/`, `images/` or `providers/`, weekly, and manually (choose the provider, Ubuntu version and arch).
+[`.github/workflows/build-image.yml`](.github/workflows/build-image.yml) runs on pull requests, on pushes to `main` that change `packer/`, `images/`, `providers/`, `build.sh` or `action.yml`, weekly, and manually (choose the provider, Ubuntu version and arch).
 
 - **Validate** (every run): `packer fmt -check`, `packer validate` for every provider, shellcheck and actionlint. Pull requests stop here and never see a secret.
 - **Runner version**: fails the weekly run if the pinned runner is more than 21 days behind (see [Versions](#versions)).
-- **Build**, one matrix leg per provider. Each leg runs in a GitHub environment named after the provider, which holds that provider's secrets only. It calls `providers/<name>/ci/*` for everything provider-specific:
-  1. validate and build the image (version `YYYYMMDD.<run number>`)
-  2. upload `manifest.json` and the build log as artifacts
-  3. start a test server with a one-off SSH key, wait for SSH and run [`smoke.sh`](images/ubuntu/tests/smoke.sh) as `runner`
-  4. delete the test server, whatever happened
-  5. if everything passed, promote the image to `stable` and delete all but the newest 2 stable images; otherwise delete the new image
+- **Build**, one matrix leg per provider. Each leg runs in a GitHub environment named after the provider, which holds that provider's secrets only. It uses the action in this repository (`uses: ./`), so CI runs exactly what other repositories run. `build.sh release` calls `providers/<name>/ci/*` for everything provider-specific:
+  1. build the image (version `YYYYMMDD.<run number>`)
+  2. start a test server with a one-off SSH key, wait for SSH and run [`smoke.sh`](images/ubuntu/tests/smoke.sh) as `runner`
+  3. delete the test server
+  4. promote the image to `stable` and delete all but the newest 2 stable images
 
-The job summary shows the version, image ID and size, build time, how long the test server took to accept SSH, and the smoke test result.
+  If any step fails, the provider's `cleanup` deletes everything this build created, found by its labels; the action runs it again even when the job was cancelled. The manifest and logs are uploaded as artifacts.
+
+The job summary shows the result, image ID and size, build time, how long the test server took to accept SSH, and the smoke test output.
 
 To add CI for a new provider, create a GitHub environment with its name and secrets, then add the name to the matrix.
 
 ## Providers
 
-A provider is one folder in [`providers/`](providers) with a Packer source, six lifecycle scripts and a README. All provisioning is shared. [docs/adding-a-provider.md](docs/adding-a-provider.md) describes the interface, has a checklist, and checks the design against Scaleway.
+A provider is one folder in [`providers/`](providers) with a Packer source, seven lifecycle scripts and a README. All provisioning is shared. [docs/adding-a-provider.md](docs/adding-a-provider.md) describes the interface, has a checklist, and checks the design against Scaleway.
 
 | Provider | Image |
 |---|---|
@@ -145,7 +223,8 @@ Ubuntu 26.04 mounts `/tmp` as tmpfs, in RAM (up to half of it). GitHub-hosted ru
 ## Layout
 
 ```
-build.sh                    runs Packer on packer/ plus every provider's source
+build.sh                    builds, tests and releases images: Packer on packer/ plus every provider's source
+action.yml                  the GitHub Action other repositories use; runs build.sh release
 packer/
   plugins.pkr.hcl           Packer plugins, one per provider
   variables.pkr.hcl         shared variables and image metadata

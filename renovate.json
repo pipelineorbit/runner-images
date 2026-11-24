@@ -8,10 +8,11 @@
       "managerFilePatterns": [
         "/^images/ubuntu/versions\\.env$/",
         "/^providers/[^/]+/ci/lib\\.sh$/",
-        "/^\\.github/workflows/[^/]+\\.ya?ml$/"
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/",
+        "/^action\\.yml$/"
       ],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: registryUrl=(?<registryUrl>\\S+))?(?: extractVersion=(?<extractVersion>\\S+))?\\s*\\n\\s*[A-Z0-9_]+(?:=|:\\s*)\"?(?<currentValue>[^\"\\s]+)\"?"
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: registryUrl=(?<registryUrl>\\S+))?(?: extractVersion=(?<extractVersion>\\S+))?\\s*\\n\\s*[A-Za-z0-9_-]+(?:=|:\\s*)\"?(?<currentValue>[^\"\\s]+)\"?"
       ]
     },
     {

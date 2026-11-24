@@ -12,9 +12,10 @@ Builds the image as a [Hetzner Cloud](https://www.hetzner.com/cloud) snapshot wi
 Everything reads an API token from `HCLOUD_TOKEN`; nothing reads a token from a file. Create a token with **Read & Write** access in the Hetzner Console, under your project's **Security** > **API tokens**.
 
 - **Locally:** `export HCLOUD_TOKEN=...`
-- **In CI:** create a GitHub environment named `hetzner` (repository **Settings** > **Environments**) with a secret `HCLOUD_TOKEN`. Under **Deployment branches and tags**, allow only `main`, so code from other branches can't use the token. [`ci/credentials`](./ci/credentials) lists the secret names CI exports for this provider.
+- **In your own workflow:** pass it to the action as an environment variable, `HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}` (see [Use it in your pipeline](../../README.md#use-it-in-your-pipeline)).
+- **In this repository's CI:** create a GitHub environment named `hetzner` (repository **Settings** > **Environments**) with a secret `HCLOUD_TOKEN`. Under **Deployment branches and tags**, allow only `main`, so code from other branches can't use the token. [`ci/credentials`](./ci/credentials) lists the secret names CI exports for this provider.
 
-The token can create and delete servers and snapshots in the project, so use a project that only builds runner images, or at least none whose snapshots carry the labels below.
+The token can create and delete servers and snapshots in the project, so use a project that only builds runner images, or at least none whose snapshots carry the labels below. Builds only delete servers, keys and images that carry their own labels.
 
 ## Settings
 
@@ -50,7 +51,7 @@ To start a runner from the newest stable image:
 hcloud image list --type snapshot --selector image=ubuntu26,arch=x86_64,channel=stable --sort created:desc
 ```
 
-Builder servers have the label `purpose=image-builder` and test servers `purpose=image-smoke-test`. Both are deleted when the build or test ends, also when it fails. If a job is killed hard (for example, the runner machine dies), look for leftovers with `hcloud server list --selector purpose`.
+Builder servers are labelled `purpose=image-builder` and test servers `purpose=image-smoke-test`, both also with the build's `version` and `arch`, and so are their temporary SSH keys. When a release fails, [`ci/cleanup`](./ci/cleanup) deletes them and the candidate image by these labels; servers without a `purpose` label are never touched. If a run is killed before it can clean up (for example, the machine running it dies), run `./build.sh cleanup hetzner <version>`, or look for leftovers with `hcloud server list --selector purpose`.
 
 ## Costs
 
@@ -70,17 +71,39 @@ Servers created from Hetzner's own images use Hetzner's faster "rapid deploy" st
 
 Most of the time is the first boot itself, so the snapshot costs only a few seconds. `run-smoke.sh` prints this time as `ssh_ready_seconds`, and CI shows it in the job summary.
 
+## Reusing a server
+
+`hcloud server rebuild --image <snapshot> --user-data-from-file <file> <server>` writes the snapshot to the server's disk and boots it again. The server keeps its ID, IP addresses and SSH keys and stays the same server for billing, so a rebuild doesn't start a new billed hour.
+
+**Pass user data on every rebuild.** Without it, Hetzner applies the server's last user data again. In a test, a rebuild without user data wrote the previous job's JIT config back. The runner rejected it, because GitHub had already removed its registration, but a `poweroff-after-job` file in that user data would have switched the server off. To rebuild a server so it waits for its next job, pass user data that is just `#cloud-config`.
+
+Measured in `hel1` on `ccx13` in November 2026, seconds until the runner received its job:
+
+| How the runner got its JIT config | Counted from | Seconds |
+|---|---|---|
+| Create user data (new server), 6 runs | `hcloud server create` | 31–38 |
+| Rebuild user data, 2 runs | the rebuild request | 37–46 |
+| SSH, on a server rebuilt right after its previous job, 1 run | the SSH command | 8 |
+
+The rebuild itself took 16–19 s before the server started booting. A rebuild without a job to run accepted SSH 32–35 s after the request (2 runs).
+
 ## Build size and time
 
 The image uses 4.4 GB of disk; Hetzner stores the snapshot as 1.24 GB, about €0.02 a month. A build takes 3 to 4 minutes on `ccx13`, most of it installing packages.
 
 ## Build locally
 
-You need [Packer](https://developer.hashicorp.com/packer/install), `jq`, an SSH client and `HCLOUD_TOKEN`. The CI scripts download the `hcloud` CLI if you don't have it.
+You need [Packer](https://developer.hashicorp.com/packer/install), `jq`, `curl`, an SSH client and `HCLOUD_TOKEN`. The CI scripts download the `hcloud` CLI if you don't have it.
 
 ```sh
 export HCLOUD_TOKEN=...
-./build.sh build hetzner                       # prints the version, for example 20261124.0
+./build.sh release hetzner      # build, test on a new server, promote, prune
+```
+
+To go step by step, for example to look at an image before promoting it, run the pieces yourself:
+
+```sh
+./build.sh build hetzner        # prints the version, for example 20261124.0
 
 ci=providers/hetzner/ci
 read -r image size < <($ci/find-image 20261124.0)
@@ -91,7 +114,7 @@ SERVER_CREATED_AT=$start images/ubuntu/tests/run-smoke.sh "$ip" output/smoke_key
 $ci/delete-server "$server"
 
 $ci/promote "$image" && $ci/prune 2           # if the smoke test passed
-$ci/delete-image "$image"                     # if it didn't
+$ci/cleanup 20261124.0                        # if it didn't
 ```
 
 Local builds use version `<today>.0` unless you set `PKR_VAR_image_version`, and record the commit as `<sha>-dirty` if the working tree has changes.

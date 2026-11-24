@@ -31,9 +31,10 @@ source "hcloud" "ubuntu" {
   ssh_username = "root"
 
   # Server names must be valid hostnames, so no dots or underscores.
-  server_name     = "packer-${regex_replace(local.image_name, "[._]", "-")}"
-  server_labels   = { purpose = "image-builder", version = var.image_version }
-  ssh_keys_labels = { purpose = "image-builder", version = var.image_version }
+  server_name = "packer-${regex_replace(local.image_name, "[._]", "-")}"
+  # ci/cleanup finds what a cancelled build left behind by these labels.
+  server_labels   = { purpose = "image-builder", version = var.image_version, arch = var.arch }
+  ssh_keys_labels = { purpose = "image-builder", version = var.image_version, arch = var.arch }
 
   snapshot_name   = local.image_name
   snapshot_labels = local.image_metadata

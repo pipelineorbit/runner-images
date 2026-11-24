@@ -10,17 +10,23 @@ source "$(dirname "$0")/lib.sh"
 usage="usage: create-test-server <image-id> <ssh-pubkey-file>"
 image=${1:?$usage}
 pubkey=${2:?$usage}
+image_json=$(hcloud image describe "$image" -o json)
 
 # Same defaults as source.pkr.hcl, so the snapshot fits the server's disk.
 location=${PKR_VAR_hetzner_location:-hel1}
 if [[ -n ${PKR_VAR_hetzner_server_type:-} ]]; then
   type=$PKR_VAR_hetzner_server_type
-elif [[ $(hcloud image describe "$image" -o json | jq -r .architecture) == arm ]]; then
+elif [[ $(jq -r .architecture <<<"$image_json") == arm ]]; then
   type=cax11
 else
   type=ccx13
 fi
 name="smoke-$image-$(date +%s)"
+# Labelled with the image's version and arch, so ci/cleanup finds the server
+# and its key if this run is killed before it deletes them.
+labels=(--label purpose=image-smoke-test
+  --label "version=$(jq -r '.labels.version // "none"' <<<"$image_json")"
+  --label "arch=$(jq -r '.labels.arch // "none"' <<<"$image_json")")
 
 user_data=$(mktemp)
 cleanup() {
@@ -39,12 +45,11 @@ EOF
 
 # Hetzner sets a root password when a server has no SSH key, so give it the
 # same key through a temporary key object. It's only needed during creation.
-hcloud ssh-key create --name "$name" --public-key-from-file "$pubkey" \
-  --label purpose=image-smoke-test >/dev/null
+hcloud ssh-key create --name "$name" --public-key-from-file "$pubkey" "${labels[@]}" >/dev/null
 
 if ! server=$(hcloud server create --name "$name" --image "$image" --type "$type" \
   --location "$location" --ssh-key "$name" --user-data-from-file "$user_data" \
-  --label purpose=image-smoke-test -o json); then
+  "${labels[@]}" -o json); then
   # The server can exist even though the command failed.
   hcloud server delete "$name" >/dev/null 2>&1 || true
   die "could not create a $type server from snapshot $image in $location"
