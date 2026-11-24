@@ -42,3 +42,7 @@ providers/
   <provider>/         one folder per extra provider
 .github/workflows/    scheduled and on-change image builds
 ```
+
+## License
+
+[MIT](./LICENSE)
